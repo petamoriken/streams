@@ -4,7 +4,8 @@
   "description": "polyfill for https://github.com/whatwg/streams",
   "main": "index.js",
   "scripts": {
-    "build": "babel spec/reference-implementation/lib -d lib",
+    "build": "cp spec/reference-implementation/lib/*.js src && babel src -d lib",
+    "clean": "rm -rf src/* lib/*",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -28,6 +29,7 @@
     "babel-preset-stage-3": "^6.17.0"
   },
   "dependencies": {
+    "assert": "^1.4.1",
     "babel-runtime": "^6.11.6"
   }
 }
