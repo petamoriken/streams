@@ -1,28 +1,11 @@
 'use strict';
 const assert = require('assert');
 
-exports.promiseCall = (func, ...args) => {
-  try {
-    return Promise.resolve(func(...args));
-  } catch (e) {
-    return Promise.reject(e);
-  }
-};
+function IsPropertyKey(argument) {
+  return typeof argument === 'string' || typeof argument === 'symbol';
+}
 
 exports.typeIsObject = x => (typeof x === 'object' && x !== null) || typeof x === 'function';
-
-exports.toInteger = v => {
-  v = Number(v);
-  if (isNaN(v)) {
-    return 0;
-  }
-
-  if (v < 0) {
-    return -1 * Math.floor(Math.abs(v));
-  }
-
-  return Math.floor(Math.abs(v));
-};
 
 exports.createDataProperty = (o, p, v) => {
   assert(exports.typeIsObject(o));
@@ -62,14 +45,26 @@ exports.IsFiniteNonNegativeNumber = v => {
 };
 
 exports.InvokeOrNoop = (O, P, args) => {
+  assert(O !== undefined);
+  assert(IsPropertyKey(P));
+  assert(Array.isArray(args));
+
   const method = O[P];
   if (method === undefined) {
     return undefined;
   }
+
+  if (typeof method !== 'function') {
+    throw new TypeError(`${P} is not a function`);
+  }
+
   return method.apply(O, args);
 };
 
 exports.PromiseInvokeOrNoop = (O, P, args) => {
+  assert(O !== undefined);
+  assert(IsPropertyKey(P));
+  assert(Array.isArray(args));
   try {
     return Promise.resolve(exports.InvokeOrNoop(O, P, args));
   } catch (returnValueE) {
@@ -77,23 +72,42 @@ exports.PromiseInvokeOrNoop = (O, P, args) => {
   }
 };
 
-exports.PromiseInvokeOrFallbackOrNoop = (O, P1, args1, P2, args2) => {
+exports.PromiseInvokeOrPerformFallback = (O, P, args, F, argsF) => {
+  assert(O !== undefined);
+  assert(IsPropertyKey(P));
+  assert(Array.isArray(args));
+  assert(Array.isArray(argsF));
+
   let method;
   try {
-    method = O[P1];
+    method = O[P];
   } catch (methodE) {
     return Promise.reject(methodE);
   }
 
   if (method === undefined) {
-    return exports.PromiseInvokeOrNoop(O, P2, args2);
+    return F(...argsF);
+  }
+
+  if (typeof method !== 'function') {
+    return Promise.reject(new TypeError(`${P} is not a function`));
   }
 
   try {
-    return Promise.resolve(method.apply(O, args1));
+    return Promise.resolve(method.apply(O, args));
   } catch (e) {
     return Promise.reject(e);
   }
+};
+
+exports.PromiseInvokeOrFallbackOrNoop = (O, P1, args1, P2, args2) => {
+  assert(O !== undefined);
+  assert(IsPropertyKey(P1));
+  assert(Array.isArray(args1));
+  assert(IsPropertyKey(P2));
+  assert(Array.isArray(args2));
+
+  return exports.PromiseInvokeOrPerformFallback(O, P1, args1, exports.PromiseInvokeOrNoop, [O, P2, args2]);
 };
 
 // Not implemented correctly

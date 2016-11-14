@@ -29,7 +29,6 @@
     "babel-preset-stage-3": "^6.17.0"
   },
   "dependencies": {
-    "assert": "^1.4.1",
     "babel-runtime": "^6.11.6"
   }
 }
