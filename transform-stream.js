@@ -1,3 +1,3 @@
 "use strict";
 
-module.exports = require("./lib/transform-stream");
+module.exports = require("./lib/transform-stream").TransformStream;
