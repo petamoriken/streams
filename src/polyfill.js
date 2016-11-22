@@ -1,7 +1,5 @@
 "use strict";
 
-import { typeIsObject } from "./helpers";
-
 import { ReadableStream } from "./readable-stream";
 import { WritableStream } from "./writable-stream";
 import { TransformStream } from "./transform-stream";
