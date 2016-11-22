@@ -1,9 +1,16 @@
 {
-	"presets":	[
+	"presets": [
 		"latest",
 		"stage-3"
 	],
-	"plugins":	[
+	"plugins": [
 		"transform-runtime"
-	]
+	],
+	"env": {
+		"development": {
+			"presets": [
+				"power-assert"
+			]
+		}
+	}
 }

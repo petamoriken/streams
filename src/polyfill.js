@@ -3,17 +3,11 @@
 import { typeIsObject } from "./helpers";
 
 import { ReadableStream } from "./readable-stream";
-import { WritableStream } from "./writble-stream";
+import { WritableStream } from "./writable-stream";
 import { TransformStream } from "./transform-stream";
 
 import ByteLengthQueuingStrategy from "./byte-length-queuing-strategy";
 import CountQueuingStrategy from "./count-queuing-strategy";
-
-const global = 
-    typeof window !== "undefined" ? window :
-    typeof self !== "undefined" ? self :
-    typeof global !== "undefined" ? global : Function("return this")()
-;
 
 const OriginalReadableStream = global.ReadableStream;
 
@@ -40,7 +34,7 @@ if(!OriginalReadableStream) {
             return Promise.reject(new TypeError('ReadableStream.prototype.pipeTo\'s first argument must be a WritableStream'));
         }
 
-        const reader = this.reader();
+        const reader = this.getReader();
         const shim = new ReadableStream({
             start(controller) {
                 (async () => {
@@ -64,32 +58,7 @@ if(!OriginalReadableStream) {
         return readable;
     };
 
-    ReadableStream.polyfill = true;    
-
-    // overwrite instanceof
-    ReadableStream[Symbol.hasInstance] = function (instance) {
-        if(typeof this !== "function") {
-            return false;
-        }
-        if(!typeIsObject(instance)) {
-            return false;
-        }
-
-        // original instanceof
-        if(instance instanceof OriginalReadableStream) {
-            return true;
-        }
-
-        // polyfill instanceof
-        const prototype = this.prototype;
-
-        let proto = instance.__proto__;
-        do {
-            if(proto === prototype) return true;
-        } while(proto = proto.__proto__);
-
-        return false;
-    };
+    ReadableStream.polyfill = true;
     
     global.ReadableStream = ReadableStream;
     global.WritableStream = WritableStream;

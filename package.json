@@ -4,11 +4,11 @@
   "description": "polyfill for https://github.com/whatwg/streams",
   "main": "index.js",
   "scripts": {
-    "build": "yarn run clean && yarn run pull && yarn run build-lib",
-    "build-lib": "cp spec/reference-implementation/lib/*.js src && babel src -d lib",
+    "build": "yarn upgrade && yarn run clean && yarn run pull && yarn run build-lib",
+    "build-lib": "cp spec/reference-implementation/lib/*.js src && NODE_ENV=production babel src -d lib",
     "pull": "git submodule foreach git pull",
     "clean": "cd src && ls | grep -v -E 'polyfill.js' | xargs rm -rf -r ../lib/*",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "mocha"
   },
   "repository": {
     "type": "git",
@@ -28,7 +28,13 @@
     "babel-cli": "^6.16.0",
     "babel-plugin-transform-runtime": "^6.15.0",
     "babel-preset-latest": "^6.16.0",
-    "babel-preset-stage-3": "^6.17.0"
+    "babel-preset-power-assert": "^1.0.0",
+    "babel-preset-stage-3": "^6.17.0",
+    "babel-register": "^6.18.0",
+    "browserify": "^13.1.1",
+    "mocha": "^3.1.2",
+    "power-assert": "^1.4.2",
+    "webdriverio": "^4.4.0"
   },
   "dependencies": {
     "babel-runtime": "^6.11.6"
