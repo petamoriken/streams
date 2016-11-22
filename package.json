@@ -4,7 +4,9 @@
   "description": "polyfill for https://github.com/whatwg/streams",
   "main": "index.js",
   "scripts": {
-    "build": "cp spec/reference-implementation/lib/*.js src && babel src -d lib",
+    "build": "yarn run clean && yarn run pull && yarn run build-lib",
+    "build-lib": "cp spec/reference-implementation/lib/*.js src && babel src -d lib",
+    "pull": "git submodule foreach git pull",
     "clean": "cd src && ls | grep -v -E 'polyfill.js' | xargs rm -rf -r ../lib/*",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
