@@ -1,7 +1,7 @@
+const fs = require("fs");
+
 const assert = require("assert");
 const webdriverio = require("webdriverio");
-
-const browserify = require("browserify");
 
 // chrome
 const client = webdriverio.remote({
@@ -12,35 +12,36 @@ const client = webdriverio.remote({
 });
 
 // polyfill
-let polyfillCode = "";
-const readable = browserify("lib/polyfill.js").bundle();
-readable.on("data", text => {
-    polyfillCode += text;
-});
-const polyfillPromise = new Promise(resolve => {
-    readable.on("end", () => {
-        resolve();
+const polyfillPromise = new Promise((resolve, reject) => {
+    fs.readFile("browser/streams.min.opt.js", "utf8", (err, data) => {
+        if(err) reject(err);
+        resolve(data);
     });
 });
 
-describe("Fetch API test", function() {
-    this.timeout(30000);
+describe("Fetch API response.body test in Chrome", function() {
+    this.timeout(20000);
+
+    let polyfillCode;
 
     before(async () => {
         await client.init()
-            .timeouts("script", 30000)
+            .timeouts("script", 5000)
             .url("http://petamoriken.github.io/streams/test/");
         
-        await polyfillPromise;
-        await client.execute(polyfillCode);
+        polyfillCode = await polyfillPromise;
     });
     after(() => client.end());
 
-    it("response.body (ReadableStream) has pipeTo/pipeThrough", async function() {
+    it("exec polyfill", async function() {
+        await client.execute(polyfillCode);
+    });
+
+    it("response.body enable to use pipeTo/pipeThrough", async function() {
         const result = await client
             .executeAsync(function(done) {
 
-                // browser code
+                // in browser
                 fetch("test.txt").then(response => {
                     let fetchText = "";
                     const decoder = new TextDecoder();
@@ -48,7 +49,7 @@ describe("Fetch API test", function() {
                     return response.body
                         .pipeThrough(new TransformStream({
                             transform(chunk, controller) {
-                                controller.enqueue(chunk);
+                                controller.enqueue( chunk.map(val => val + 1) );
                             }
                         }))
                         .pipeTo(new WritableStream({
@@ -56,7 +57,6 @@ describe("Fetch API test", function() {
                                 fetchText += decoder.decode(chunk);
                             }
                         })).then(() => fetchText);
-
                 }).then(result => {
                     done(result);
                 }).catch(e => {
@@ -65,6 +65,6 @@ describe("Fetch API test", function() {
 
             });
         
-        assert.equal(result.value, "1234567890");
+        assert.equal(result.value, "23456789:1");
     });
 });

@@ -9,22 +9,33 @@ import CountQueuingStrategy from "./count-queuing-strategy";
 
 const OriginalReadableStream = global.ReadableStream;
 
+function define(obj, key, value) {
+    Object.defineProperty(obj, key, {
+        configurable: true,
+        writable: true,
+        value
+    });
+}
+
+for(const obj of [ReadableStream, WritableStream, TransformStream, ByteLengthQueuingStrategy, CountQueuingStrategy]) {
+    obj.polyfill = true;
+}
+ReadableStream.original = null;
+
 if(!OriginalReadableStream) {
 
-    ReadableStream.polyfill = true;
-
-    global.ReadableStream = ReadableStream;
-    global.WritableStream = WritableStream;
-    global.TransformStream = TransformStream;
-    global.ByteLengthQueuingStrategy = ByteLengthQueuingStrategy;
-    global.CountQueuingStrategy = CountQueuingStrategy;
+    define(global, "ReadableStream", ReadableStream);
+    define(global, "WritableStream", WritableStream);
+    define(global, "TransformStream", TransformStream);
+    define(global, "ByteLengthQueuingStrategy", ByteLengthQueuingStrategy);
+    define(global, "CountQueuingStrategy", CountQueuingStrategy);
 
 } else if(!OriginalReadableStream.prototype.pipeTo) {
 
     // update Original ReadableStream for Fetch API
     const OriginalProto = OriginalReadableStream.prototype;
 
-    OriginalProto.pipeTo = function pipeTo(dest, options) {
+    define(OriginalProto, "pipeTo", function pipeTo(dest, options) {
         if(!(this instanceof OriginalReadableStream)) {
             return Promise.reject(new TypeError("ReadableStream.prototype.pipeTo can only be used on a ReadableStream"));
         }
@@ -49,16 +60,16 @@ if(!OriginalReadableStream) {
         });
 
         return shim.pipeTo(dest, options);
-    };
+    });
 
-    OriginalProto.pipeThrough = function pipeThrough({ writable, readable }, options) {
+    define(OriginalProto, "pipeThrough", function pipeThrough({ writable, readable }, options) {
         this.pipeTo(writable, options);
         return readable;
-    };
+    });
 
-    ReadableStream.polyfill = true;
+    ReadableStream.original = OriginalReadableStream;
     
-    global.ReadableStream = ReadableStream;
-    global.WritableStream = WritableStream;
-    global.TransformStream = TransformStream;
+    define(global, "ReadableStream", ReadableStream);
+    define(global, "WritableStream", WritableStream);
+    define(global, "TransformStream", TransformStream);
 }

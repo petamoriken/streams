@@ -4,7 +4,9 @@
   "description": "polyfill for https://github.com/whatwg/streams",
   "main": "index.js",
   "scripts": {
-    "build": "yarn upgrade && yarn run clean && yarn run pull && yarn run build-lib",
+    "build": "yarn run clean && yarn run pull && yarn run build-lib && yarn run build-browser",
+    "build-browser": "NODE_ENV=production browserify -t babelify src/polyfill.js --no-commondir --igv global -o browser/streams.js && yarn run build-browser-opt",
+    "build-browser-opt": "uglifyjs browser/streams.js -c -o browser/streams.min.js && optimize-js browser/streams.min.js > browser/streams.min.opt.js",
     "build-lib": "cp spec/reference-implementation/lib/*.js src && NODE_ENV=production babel src -d lib",
     "pull": "git submodule foreach git pull",
     "clean": "cd src && ls | grep -v -E 'polyfill.js' | xargs rm -rf -r ../lib/*",
@@ -31,12 +33,15 @@
     "babel-preset-power-assert": "^1.0.0",
     "babel-preset-stage-3": "^6.17.0",
     "babel-register": "^6.18.0",
+    "babelify": "^7.3.0",
     "browserify": "^13.1.1",
     "mocha": "^3.1.2",
     "power-assert": "^1.4.2",
+    "uglifyjs": "^2.4.10",
     "webdriverio": "^4.4.0"
   },
   "dependencies": {
-    "babel-runtime": "^6.11.6"
+    "babel-runtime": "^6.11.6",
+    "optimize-js": "^1.0.2"
   }
 }
