@@ -27,16 +27,20 @@ describe("Fetch API test", function() {
     this.timeout(30000);
 
     before(async () => {
-        await client.init().timeouts("script", 30000);
+        await client.init()
+            .timeouts("script", 30000)
+            .url("http://petamoriken.github.io/streams/test/");
+        
         await polyfillPromise;
+        await client.execute(polyfillCode);
     });
     after(() => client.end());
 
-    it("Fetch API response.body (ReadableStream) has pipeTo/pipeThrough", async function() {
+    it("response.body (ReadableStream) has pipeTo/pipeThrough", async function() {
         const result = await client
-            .url("http://moriken.kimamass.com/test/")
-            .execute(polyfillCode)
             .executeAsync(function(done) {
+
+                // browser code
                 fetch("test.txt").then(response => {
                     let fetchText = "";
                     const decoder = new TextDecoder();
@@ -52,11 +56,13 @@ describe("Fetch API test", function() {
                                 fetchText += decoder.decode(chunk);
                             }
                         })).then(() => fetchText);
+
                 }).then(result => {
                     done(result);
                 }).catch(e => {
-                    done("Error!");
+                    done(e.message);
                 });
+
             });
         
         assert.equal(result.value, "1234567890");
