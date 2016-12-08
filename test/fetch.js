@@ -19,6 +19,9 @@ const polyfillPromise = new Promise((resolve, reject) => {
     });
 });
 
+const uri = "http://petamoriken.github.io/streams/test/";
+
+
 describe("Fetch API response.body test in Chrome", function() {
     this.timeout(20000);
 
@@ -27,13 +30,13 @@ describe("Fetch API response.body test in Chrome", function() {
     before(async () => {
         await client.init()
             .timeouts("script", 5000)
-            .url("http://petamoriken.github.io/streams/test/");
+            .url(uri);
         
         polyfillCode = await polyfillPromise;
     });
     after(() => client.end());
 
-    it("exec polyfill", async function() {
+    it("append polyfill", async function() {
         await client.execute(polyfillCode);
     });
 
@@ -46,25 +49,19 @@ describe("Fetch API response.body test in Chrome", function() {
                     let fetchText = "";
                     const decoder = new TextDecoder();
 
-                    return response.body
-                        .pipeThrough(new TransformStream({
+                    return response.body.pipeThrough(new TransformStream({
                             transform(chunk, controller) {
                                 controller.enqueue( chunk.map(val => val + 1) );
                             }
-                        }))
-                        .pipeTo(new WritableStream({
+                        })).pipeTo(new WritableStream({
                             write(chunk) {
                                 fetchText += decoder.decode(chunk);
                             }
                         })).then(() => fetchText);
-                }).then(result => {
-                    done(result);
-                }).catch(e => {
-                    done(e.message);
-                });
+                }).then(done).catch(e => done(e.message));
 
             });
-        
+
         assert.equal(result.value, "23456789:1");
     });
 });

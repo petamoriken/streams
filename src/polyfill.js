@@ -19,8 +19,8 @@ function define(obj, key, value) {
 
 for(const obj of [ReadableStream, WritableStream, TransformStream, ByteLengthQueuingStrategy, CountQueuingStrategy]) {
     obj.polyfill = true;
+    obj.original = null;
 }
-ReadableStream.original = null;
 
 if(!OriginalReadableStream) {
 
@@ -30,6 +30,7 @@ if(!OriginalReadableStream) {
     define(global, "ByteLengthQueuingStrategy", ByteLengthQueuingStrategy);
     define(global, "CountQueuingStrategy", CountQueuingStrategy);
 
+// Chrome 43 ~
 } else if(!OriginalReadableStream.prototype.pipeTo) {
 
     // update Original ReadableStream for Fetch API
@@ -40,7 +41,7 @@ if(!OriginalReadableStream) {
             return Promise.reject(new TypeError("ReadableStream.prototype.pipeTo can only be used on a ReadableStream"));
         }
         if(!(dest instanceof WritableStream)) {
-            return Promise.reject(new TypeError('ReadableStream.prototype.pipeTo\'s first argument must be a WritableStream'));
+            return Promise.reject(new TypeError("ReadableStream.prototype.pipeTo's first argument must be a WritableStream"));
         }
 
         const reader = this.getReader();

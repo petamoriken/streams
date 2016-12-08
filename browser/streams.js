@@ -3814,8 +3814,8 @@ var _arr = [_readableStream.ReadableStream, _writableStream.WritableStream, _tra
 for (var _i = 0; _i < _arr.length; _i++) {
     var obj = _arr[_i];
     obj.polyfill = true;
+    obj.original = null;
 }
-_readableStream.ReadableStream.original = null;
 
 if (!OriginalReadableStream) {
 
@@ -3824,6 +3824,8 @@ if (!OriginalReadableStream) {
     define(global, "TransformStream", _transformStream.TransformStream);
     define(global, "ByteLengthQueuingStrategy", _byteLengthQueuingStrategy2.default);
     define(global, "CountQueuingStrategy", _countQueuingStrategy2.default);
+
+    // Chrome 43 ~
 } else if (!OriginalReadableStream.prototype.pipeTo) {
 
     // update Original ReadableStream for Fetch API
@@ -3834,7 +3836,7 @@ if (!OriginalReadableStream) {
             return _promise2.default.reject(new TypeError("ReadableStream.prototype.pipeTo can only be used on a ReadableStream"));
         }
         if (!(dest instanceof _writableStream.WritableStream)) {
-            return _promise2.default.reject(new TypeError('ReadableStream.prototype.pipeTo\'s first argument must be a WritableStream'));
+            return _promise2.default.reject(new TypeError("ReadableStream.prototype.pipeTo's first argument must be a WritableStream"));
         }
 
         var reader = this.getReader();
@@ -6228,7 +6230,8 @@ function TransformStreamTransform(transformStream, chunk) {
 
     return TransformStreamReadableReadyPromise(transformStream);
   }, function (e) {
-    return TransformStreamErrorIfNeeded(transformStream, e);
+    TransformStreamErrorIfNeeded(transformStream, e);
+    return _promise2.default.reject(e);
   });
 }
 
@@ -6611,6 +6614,17 @@ var WritableStream = function () {
     // producer without waiting for the queued writes to finish.
     this._writeRequests = [];
 
+    // Write requests are removed from _writeRequests when write() is called on the underlying sink. This prevents
+    // them from being erroneously rejected on error. If a write() call is pending, the request is stored here.
+    this._pendingWriteRequest = undefined;
+
+    // The promise that was returned from writer.close(). Stored here because it may be fulfilled after the writer
+    // has been detached.
+    this._pendingCloseRequest = undefined;
+
+    // The promise that was returned from writer.abort(). This may also be fulfilled after the writer has detached.
+    this._pendingAbortRequest = undefined;
+
     var type = underlyingSink.type;
 
     if (type !== undefined) {
@@ -6710,6 +6724,25 @@ function WritableStreamAbort(stream, reason) {
 
   WritableStreamError(stream, error);
 
+  var controller = stream._writableStreamController;
+  assert(controller !== undefined);
+  if (controller._writing === true || controller._inClose === true) {
+    var promise = new _promise2.default(function (resolve, reject) {
+      var abortRequest = {
+        _resolve: resolve,
+        _reject: reject
+      };
+
+      stream._pendingAbortRequest = abortRequest;
+    });
+    if (controller._writing === true) {
+      return promise.then(function () {
+        return WritableStreamDefaultControllerAbort(stream._writableStreamController, reason);
+      });
+    }
+    return promise;
+  }
+
   return WritableStreamDefaultControllerAbort(stream._writableStreamController, reason);
 }
 
@@ -6732,9 +6765,52 @@ function WritableStreamAddWriteRequest(stream) {
 }
 
 function WritableStreamError(stream, e) {
-  var state = stream._state;
-  assert(state === 'writable' || state === 'closing');
+  var oldState = stream._state;
+  assert(oldState === 'writable' || oldState === 'closing');
+  stream._state = 'errored';
+  stream._storedError = e;
 
+  var controller = stream._writableStreamController;
+  // This method can be called during the construction of the controller, in which case "controller" will be undefined
+  // but the flags are guaranteed to be false anyway.
+  if (controller === undefined || controller._writing === false && controller._inClose === false) {
+    WritableStreamRejectPromisesInReactionToError(stream);
+  }
+
+  var writer = stream._writer;
+  if (writer !== undefined) {
+    if (oldState === 'writable' && WritableStreamDefaultControllerGetBackpressure(stream._writableStreamController) === true) {
+      defaultWriterReadyPromiseReject(writer, e);
+    } else {
+      defaultWriterReadyPromiseResetToRejected(writer, e);
+    }
+    writer._readyPromise.catch(function () {});
+  }
+}
+
+function WritableStreamFinishClose(stream) {
+  assert(stream._state === 'closing' || stream._state === 'errored');
+
+  if (stream._state === 'closing') {
+    defaultWriterClosedPromiseResolve(stream._writer);
+    stream._state = 'closed';
+  } else {
+    assert(stream._state === 'errored');
+    defaultWriterClosedPromiseReject(stream._writer, stream._storedError);
+    stream._writer._closedPromise.catch(function () {});
+  }
+
+  if (stream._pendingAbortRequest !== undefined) {
+    stream._pendingAbortRequest._resolve();
+    stream._pendingAbortRequest = undefined;
+  }
+}
+
+function WritableStreamRejectPromisesInReactionToError(stream) {
+  assert(stream._state === 'errored');
+  assert(stream._pendingWriteRequest === undefined);
+
+  var storedError = stream._storedError;
   var _iteratorNormalCompletion = true;
   var _didIteratorError = false;
   var _iteratorError = undefined;
@@ -6743,7 +6819,7 @@ function WritableStreamError(stream, e) {
     for (var _iterator = (0, _getIterator3.default)(stream._writeRequests), _step; !(_iteratorNormalCompletion = (_step = _iterator.next()).done); _iteratorNormalCompletion = true) {
       var writeRequest = _step.value;
 
-      writeRequest._reject(e);
+      writeRequest._reject(storedError);
     }
   } catch (err) {
     _didIteratorError = true;
@@ -6762,40 +6838,17 @@ function WritableStreamError(stream, e) {
 
   stream._writeRequests = [];
 
-  var writer = stream._writer;
-  if (writer !== undefined) {
-    defaultWriterClosedPromiseReject(writer, e);
-    writer._closedPromise.catch(function () {});
-
-    if (state === 'writable' && WritableStreamDefaultControllerGetBackpressure(stream._writableStreamController) === true) {
-      defaultWriterReadyPromiseReject(writer, e);
-    } else {
-      defaultWriterReadyPromiseResetToRejected(writer, e);
-    }
-    writer._readyPromise.catch(function () {});
+  if (stream._pendingCloseRequest !== undefined) {
+    assert(stream._writableStreamController._inClose === false);
+    stream._pendingCloseRequest._reject(storedError);
+    stream._pendingCloseRequest = undefined;
   }
 
-  stream._state = 'errored';
-  stream._storedError = e;
-}
-
-function WritableStreamFinishClose(stream) {
-  assert(stream._state === 'closing');
-
-  // writer cannot be released while close() is ongoing. So, we can assert that
-  // there's an active writer.
-  assert(stream._writer !== undefined);
-
-  stream._state = 'closed';
-
-  defaultWriterClosedPromiseResolve(stream._writer);
-}
-
-function WritableStreamFulfillWriteRequest(stream) {
-  assert(stream._writeRequests.length > 0);
-
-  var writeRequest = stream._writeRequests.shift();
-  writeRequest._resolve(undefined);
+  var writer = stream._writer;
+  if (writer !== undefined) {
+    defaultWriterClosedPromiseReject(writer, storedError);
+    writer._closedPromise.catch(function () {});
+  }
 }
 
 function WritableStreamUpdateBackpressure(stream, backpressure) {
@@ -6987,7 +7040,14 @@ function WritableStreamDefaultWriterClose(writer) {
 
   assert(state === 'writable');
 
-  var promise = WritableStreamAddWriteRequest(stream);
+  var promise = new _promise2.default(function (resolve, reject) {
+    var closeRequest = {
+      _resolve: resolve,
+      _reject: reject
+    };
+
+    stream._pendingCloseRequest = closeRequest;
+  });
 
   if (WritableStreamDefaultControllerGetBackpressure(stream._writableStreamController) === true) {
     defaultWriterReadyPromiseResolve(writer);
@@ -7042,7 +7102,7 @@ function WritableStreamDefaultWriterRelease(writer) {
   var releasedError = new TypeError('Writer was released and can no longer be used to monitor the stream\'s closedness');
   var state = stream._state;
 
-  if (state === 'writable' || state === 'closing') {
+  if (state === 'writable' || state === 'closing' || stream._pendingAbortRequest !== undefined) {
     defaultWriterClosedPromiseReject(writer, releasedError);
   } else {
     defaultWriterClosedPromiseResetToRejected(writer, releasedError);
@@ -7098,6 +7158,7 @@ var WritableStreamDefaultController = function () {
     this._queue = [];
     this._started = false;
     this._writing = false;
+    this._inClose = false;
 
     var normalizedStrategy = ValidateAndNormalizeQueuingStrategy(size, highWaterMark);
     this._strategySize = normalizedStrategy.size;
@@ -7249,15 +7310,30 @@ function WritableStreamDefaultControllerProcessClose(controller) {
   DequeueValue(controller._queue);
   assert(controller._queue.length === 0, 'queue must be empty once the final write record is dequeued');
 
+  controller._inClose = true;
   var sinkClosePromise = PromiseInvokeOrNoop(controller._underlyingSink, 'close', [controller]);
   sinkClosePromise.then(function () {
-    if (stream._state !== 'closing') {
+    assert(controller._inClose === true);
+    controller._inClose = false;
+    if (stream._state !== 'closing' && stream._state !== 'errored') {
       return;
     }
 
-    WritableStreamFulfillWriteRequest(stream);
+    assert(stream._pendingCloseRequest !== undefined);
+    stream._pendingCloseRequest._resolve(undefined);
+    stream._pendingCloseRequest = undefined;
+
     WritableStreamFinishClose(stream);
   }, function (r) {
+    assert(controller._inClose === true);
+    controller._inClose = false;
+    assert(stream._pendingCloseRequest !== undefined);
+    stream._pendingCloseRequest._reject(r);
+    stream._pendingCloseRequest = undefined;
+    if (stream._pendingAbortRequest !== undefined) {
+      stream._pendingAbortRequest._reject(r);
+      stream._pendingAbortRequest = undefined;
+    }
     WritableStreamDefaultControllerErrorIfNeeded(controller, r);
   }).catch(rethrowAssertionErrorRejection);
 }
@@ -7265,18 +7341,31 @@ function WritableStreamDefaultControllerProcessClose(controller) {
 function WritableStreamDefaultControllerProcessWrite(controller, chunk) {
   controller._writing = true;
 
+  var stream = controller._controlledWritableStream;
+
+  assert(stream._pendingWriteRequest === undefined);
+  assert(stream._writeRequests.length !== 0);
+  stream._pendingWriteRequest = stream._writeRequests.shift();
   var sinkWritePromise = PromiseInvokeOrNoop(controller._underlyingSink, 'write', [chunk, controller]);
   sinkWritePromise.then(function () {
-    var stream = controller._controlledWritableStream;
     var state = stream._state;
-    if (state === 'errored' || state === 'closed') {
-      return;
-    }
 
+    assert(controller._writing === true);
     controller._writing = false;
 
-    WritableStreamFulfillWriteRequest(stream);
+    assert(stream._pendingWriteRequest !== undefined);
+    stream._pendingWriteRequest._resolve(undefined);
+    stream._pendingWriteRequest = undefined;
 
+    if (state === 'errored') {
+      WritableStreamRejectPromisesInReactionToError(stream);
+
+      if (stream._pendingAbortRequest !== undefined) {
+        stream._pendingAbortRequest._resolve();
+        stream._pendingAbortRequest = undefined;
+      }
+      return;
+    }
     var lastBackpressure = WritableStreamDefaultControllerGetBackpressure(controller);
     DequeueValue(controller._queue);
     if (state !== 'closing') {
@@ -7288,6 +7377,20 @@ function WritableStreamDefaultControllerProcessWrite(controller, chunk) {
 
     WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
   }, function (r) {
+    assert(controller._writing === true);
+    controller._writing = false;
+
+    assert(stream._pendingWriteRequest !== undefined);
+    stream._pendingWriteRequest._reject(r);
+    stream._pendingWriteRequest = undefined;
+    if (stream._state === 'errored') {
+      stream._storedError = r;
+      WritableStreamRejectPromisesInReactionToError(stream);
+    }
+    if (stream._pendingAbortRequest !== undefined) {
+      stream._pendingAbortRequest._reject(r);
+      stream._pendingAbortRequest = undefined;
+    }
     WritableStreamDefaultControllerErrorIfNeeded(controller, r);
   }).catch(rethrowAssertionErrorRejection);
 }
