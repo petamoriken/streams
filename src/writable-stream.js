@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('assert');
-const { InvokeOrNoop, PromiseInvokeOrNoop, PromiseInvokeOrFallbackOrNoop, ValidateAndNormalizeQueuingStrategy,
-        typeIsObject } = require('./helpers.js');
+const { InvokeOrNoop, PromiseInvokeOrNoop, ValidateAndNormalizeQueuingStrategy, typeIsObject } =
+  require('./helpers.js');
 const { rethrowAssertionErrorRejection } = require('./utils.js');
 const { DequeueValue, EnqueueValueWithSize, GetTotalQueueSize, PeekQueueValue } = require('./queue-with-sizes.js');
 
@@ -136,12 +136,12 @@ function WritableStreamAbort(stream, reason) {
       stream._pendingAbortRequest = abortRequest;
     });
     if (controller._writing === true) {
-      return promise.then(() => WritableStreamDefaultControllerAbort(stream._writableStreamController, reason));
+      return promise.then(() => WritableStreamDefaultControllerAbort(controller, reason));
     }
     return promise;
   }
 
-  return WritableStreamDefaultControllerAbort(stream._writableStreamController, reason);
+  return WritableStreamDefaultControllerAbort(controller, reason);
 }
 
 // WritableStream API exposed for controllers.
@@ -190,13 +190,16 @@ function WritableStreamError(stream, e) {
 function WritableStreamFinishClose(stream) {
   assert(stream._state === 'closing' || stream._state === 'errored');
 
+  const writer = stream._writer;
   if (stream._state === 'closing') {
-    defaultWriterClosedPromiseResolve(stream._writer);
+    if (writer !== undefined) {
+      defaultWriterClosedPromiseResolve(writer);
+    }
     stream._state = 'closed';
-  } else {
+  } else if (writer !== undefined) {
     assert(stream._state === 'errored');
-    defaultWriterClosedPromiseReject(stream._writer, stream._storedError);
-    stream._writer._closedPromise.catch(() => {});
+    defaultWriterClosedPromiseReject(writer, stream._storedError);
+    writer._closedPromise.catch(() => {});
   }
 
   if (stream._pendingAbortRequest !== undefined) {
@@ -574,8 +577,7 @@ class WritableStreamDefaultController {
 function WritableStreamDefaultControllerAbort(controller, reason) {
   controller._queue = [];
 
-  const sinkAbortPromise = PromiseInvokeOrFallbackOrNoop(controller._underlyingSink, 'abort', [reason],
-                                                         'close', [controller]);
+  const sinkAbortPromise = PromiseInvokeOrNoop(controller._underlyingSink, 'abort', [reason]);
   return sinkAbortPromise.then(() => undefined);
 }
 
@@ -597,8 +599,9 @@ function WritableStreamDefaultControllerWrite(controller, chunk) {
   let chunkSize = 1;
 
   if (controller._strategySize !== undefined) {
+    const strategySize = controller._strategySize;
     try {
-      chunkSize = controller._strategySize(chunk);
+      chunkSize = strategySize(chunk);
     } catch (chunkSizeE) {
       // TODO: Should we notify the sink of this error?
       WritableStreamDefaultControllerErrorIfNeeded(controller, chunkSizeE);
@@ -688,10 +691,7 @@ function WritableStreamDefaultControllerProcessClose(controller) {
     () => {
       assert(controller._inClose === true);
       controller._inClose = false;
-      if (stream._state !== 'closing' && stream._state !== 'errored') {
-        return;
-      }
-
+      assert(stream._state === 'closing' || stream._state === 'errored');
       assert(stream._pendingCloseRequest !== undefined);
       stream._pendingCloseRequest._resolve(undefined);
       stream._pendingCloseRequest = undefined;
@@ -725,8 +725,6 @@ function WritableStreamDefaultControllerProcessWrite(controller, chunk) {
   const sinkWritePromise = PromiseInvokeOrNoop(controller._underlyingSink, 'write', [chunk, controller]);
   sinkWritePromise.then(
     () => {
-      const state = stream._state;
-
       assert(controller._writing === true);
       controller._writing = false;
 
@@ -734,6 +732,7 @@ function WritableStreamDefaultControllerProcessWrite(controller, chunk) {
       stream._pendingWriteRequest._resolve(undefined);
       stream._pendingWriteRequest = undefined;
 
+      const state = stream._state;
       if (state === 'errored') {
         WritableStreamRejectPromisesInReactionToError(stream);
 

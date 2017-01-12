@@ -69,10 +69,6 @@ class ReadableStream {
     }
 
     if (mode === 'byob') {
-      if (IsReadableByteStreamController(this._readableStreamController) === false) {
-        throw new TypeError('Cannot get a ReadableStreamBYOBReader for a stream not constructed with a byte source');
-      }
-
       return AcquireReadableStreamBYOBReader(this);
     }
 
@@ -665,6 +661,10 @@ class ReadableStreamBYOBReader {
       throw new TypeError('ReadableStreamBYOBReader can only be constructed with a ReadableStream instance given a ' +
           'byte source');
     }
+    if (IsReadableByteStreamController(stream._readableStreamController) === false) {
+      throw new TypeError('Cannot construct a ReadableStreamBYOBReader for a stream not constructed with a byte ' +
+          'source');
+    }
     if (IsReadableStreamLocked(stream)) {
       throw new TypeError('This stream has already been locked for exclusive reading by another reader');
     }
@@ -1067,8 +1067,9 @@ function ReadableStreamDefaultControllerEnqueue(controller, chunk) {
     let chunkSize = 1;
 
     if (controller._strategySize !== undefined) {
+      const strategySize = controller._strategySize;
       try {
-        chunkSize = controller._strategySize(chunk);
+        chunkSize = strategySize(chunk);
       } catch (chunkSizeE) {
         ReadableStreamDefaultControllerErrorIfNeeded(controller, chunkSizeE);
         throw chunkSizeE;
@@ -1579,7 +1580,7 @@ function ReadableByteStreamControllerPullInto(controller, view) {
   }
 
   if (stream._state === 'closed') {
-    const emptyView = new view.constructor(view.buffer, view.byteOffset, 0);
+    const emptyView = new view.constructor(pullIntoDescriptor.buffer, pullIntoDescriptor.byteOffset, 0);
     return Promise.resolve(CreateIterResultObject(emptyView, true));
   }
 

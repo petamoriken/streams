@@ -22,7 +22,7 @@ const polyfillPromise = new Promise((resolve, reject) => {
 const uri = "http://petamoriken.github.io/streams/test/";
 
 
-describe("Fetch API response.body test in Chrome", function() {
+describe("Fetch API test in Chrome", function() {
     this.timeout(20000);
 
     let polyfillCode;

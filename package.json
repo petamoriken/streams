@@ -4,13 +4,15 @@
   "description": "polyfill for https://github.com/whatwg/streams",
   "main": "index.js",
   "scripts": {
+    "clean": "cd src && ls | grep -v -E 'polyfill.js' | xargs rm -rf -r ../lib/*",
+    "pull": "git submodule foreach git pull origin HEAD",
     "build": "yarn run clean && yarn run pull && yarn run build-lib && yarn run build-browser",
+    "build-lib": "cp spec/reference-implementation/lib/*.js src && NODE_ENV=production babel src -d lib",
     "build-browser": "NODE_ENV=production browserify -t babelify src/polyfill.js --no-commondir --igv global -o browser/streams.js && yarn run build-browser-opt",
     "build-browser-opt": "uglifyjs browser/streams.js -c -o browser/streams.min.js && optimize-js browser/streams.min.js > browser/streams.min.opt.js",
-    "build-lib": "cp spec/reference-implementation/lib/*.js src && NODE_ENV=production babel src -d lib",
-    "pull": "git submodule foreach git pull",
-    "clean": "cd src && ls | grep -v -E 'polyfill.js' | xargs rm -rf -r ../lib/*",
-    "test": "mocha"
+    "test": "yarn run test-before && mocha && yarn run test-after",
+    "test-before": "brew services start selenium-server-standalone && brew services start chromedriver",
+    "test-after": "brew services stop selenium-server-standalone && brew services stop chromedriver"
   },
   "repository": {
     "type": "git",
