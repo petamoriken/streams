@@ -3,7 +3,7 @@ const assert = require('assert');
 const { InvokeOrNoop, PromiseInvokeOrNoop, ValidateAndNormalizeQueuingStrategy, typeIsObject } =
   require('./helpers.js');
 const { rethrowAssertionErrorRejection } = require('./utils.js');
-const { DequeueValue, EnqueueValueWithSize, GetTotalQueueSize, PeekQueueValue } = require('./queue-with-sizes.js');
+const { DequeueValue, EnqueueValueWithSize, PeekQueueValue, ResetQueue } = require('./queue-with-sizes.js');
 
 class WritableStream {
   constructor(underlyingSink = {}, { size, highWaterMark = 1 } = {}) {
@@ -505,14 +505,8 @@ class WritableStreamDefaultWriter {
       return Promise.reject(defaultWriterBrandCheckException('write'));
     }
 
-    const stream = this._ownerWritableStream;
-
-    if (stream === undefined) {
+    if (this._ownerWritableStream === undefined) {
       return Promise.reject(defaultWriterLockException('write to'));
-    }
-
-    if (stream._state === 'closing') {
-      return Promise.reject(new TypeError('Cannot write to an already-closed stream'));
     }
 
     return WritableStreamDefaultWriterWrite(this, chunk);
@@ -656,8 +650,16 @@ function WritableStreamDefaultWriterWrite(writer, chunk) {
 
   assert(stream !== undefined);
 
+  const controller = stream._writableStreamController;
+
+  const chunkSize = WritableStreamDefaultControllerGetChunkSize(controller, chunk);
+
+  if (stream !== writer._ownerWritableStream) {
+    return Promise.reject(defaultWriterLockException('write to'));
+  }
+
   const state = stream._state;
-  if (state === 'closed' || state === 'errored') {
+  if (state !== 'writable') {
     return Promise.reject(new TypeError(
       `The stream (in ${state} state) is not in the writable state and cannot be written to`));
   }
@@ -665,11 +667,9 @@ function WritableStreamDefaultWriterWrite(writer, chunk) {
     return Promise.reject(new TypeError('Aborted'));
   }
 
-  assert(state === 'writable');
-
   const promise = WritableStreamAddWriteRequest(stream);
 
-  WritableStreamDefaultControllerWrite(stream._writableStreamController, chunk);
+  WritableStreamDefaultControllerWrite(controller, chunk, chunkSize);
 
   return promise;
 }
@@ -689,7 +689,11 @@ class WritableStreamDefaultController {
 
     this._underlyingSink = underlyingSink;
 
-    this._queue = [];
+    // Need to set the slots so that the assert doesn't fire. In the spec the slots already exist implicitly.
+    this._queue = undefined;
+    this._queueTotalSize = undefined;
+    ResetQueue(this);
+
     this._started = false;
     this._writing = false;
     this._inClose = false;
@@ -736,20 +740,33 @@ class WritableStreamDefaultController {
 // Abstract operations implementing interface required by the WritableStream.
 
 function WritableStreamDefaultControllerAbort(controller, reason) {
-  controller._queue = [];
-
+  ResetQueue(controller);
   const sinkAbortPromise = PromiseInvokeOrNoop(controller._underlyingSink, 'abort', [reason]);
   return sinkAbortPromise.then(() => undefined);
 }
 
 function WritableStreamDefaultControllerClose(controller) {
-  EnqueueValueWithSize(controller._queue, 'close', 0);
+  EnqueueValueWithSize(controller, 'close', 0);
   WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
 }
 
+function WritableStreamDefaultControllerGetChunkSize(controller, chunk) {
+  const strategySize = controller._strategySize;
+
+  if (strategySize === undefined) {
+    return 1;
+  }
+
+  try {
+    return strategySize(chunk);
+  } catch (chunkSizeE) {
+    WritableStreamDefaultControllerErrorIfNeeded(controller, chunkSizeE);
+    return 1;
+  }
+}
+
 function WritableStreamDefaultControllerGetDesiredSize(controller) {
-  const queueSize = GetTotalQueueSize(controller._queue);
-  return controller._strategyHWM - queueSize;
+  return controller._strategyHWM - controller._queueTotalSize;
 }
 
 function WritableStreamDefaultControllerUpdateBackpressureIfNeeded(controller, oldBackpressure) {
@@ -764,30 +781,17 @@ function WritableStreamDefaultControllerUpdateBackpressureIfNeeded(controller, o
   }
 }
 
-function WritableStreamDefaultControllerWrite(controller, chunk) {
+function WritableStreamDefaultControllerWrite(controller, chunk, chunkSize) {
   const stream = controller._controlledWritableStream;
 
   assert(stream._state === 'writable');
-
-  let chunkSize = 1;
-
-  if (controller._strategySize !== undefined) {
-    const strategySize = controller._strategySize;
-    try {
-      chunkSize = strategySize(chunk);
-    } catch (chunkSizeE) {
-      // TODO: Should we notify the sink of this error?
-      WritableStreamDefaultControllerErrorIfNeeded(controller, chunkSizeE);
-      return;
-    }
-  }
 
   const writeRecord = { chunk };
 
   const oldBackpressure = WritableStreamDefaultControllerGetBackpressure(controller);
 
   try {
-    EnqueueValueWithSize(controller._queue, writeRecord, chunkSize);
+    EnqueueValueWithSize(controller, writeRecord, chunkSize);
   } catch (enqueueE) {
     WritableStreamDefaultControllerErrorIfNeeded(controller, enqueueE);
     return;
@@ -830,7 +834,7 @@ function WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller) {
     return;
   }
 
-  const writeRecord = PeekQueueValue(controller._queue);
+  const writeRecord = PeekQueueValue(controller);
   if (writeRecord === 'close') {
     WritableStreamDefaultControllerProcessClose(controller);
   } else {
@@ -850,7 +854,7 @@ function WritableStreamDefaultControllerProcessClose(controller) {
 
   assert(stream._state === 'closing', 'can\'t process final write record unless already closed');
 
-  DequeueValue(controller._queue);
+  DequeueValue(controller);
   assert(controller._queue.length === 0, 'queue must be empty once the final write record is dequeued');
 
   controller._inClose = true;
@@ -896,7 +900,7 @@ function WritableStreamDefaultControllerProcessWrite(controller, chunk) {
       assert(state === 'closing' || state === 'writable');
 
       const oldBackpressure = WritableStreamDefaultControllerGetBackpressure(controller);
-      DequeueValue(controller._queue);
+      DequeueValue(controller);
       WritableStreamDefaultControllerUpdateBackpressureIfNeeded(controller, oldBackpressure);
 
       WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
@@ -944,11 +948,9 @@ function WritableStreamDefaultControllerError(controller, e) {
     WritableStreamDefaultWriterEnsureReadyPromiseRejectedWith(stream._writer, e, readyPromiseIsPending);
   }
 
-  controller._queue = [];
+  ResetQueue(controller);
 
-  // This method can be called during the construction of the controller, in which case "controller" will be undefined
-  // but the flags are guaranteed to be false anyway.
-  if (controller === undefined || controller._writing === false && controller._inClose === false) {
+  if (controller._writing === false && controller._inClose === false) {
     WritableStreamRejectPromisesInReactionToError(stream);
   }
 }

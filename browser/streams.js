@@ -2642,90 +2642,34 @@ if (hadRuntime) {
         return doneResult();
       }
 
+      context.method = method;
+      context.arg = arg;
+
       while (true) {
         var delegate = context.delegate;
         if (delegate) {
-          if (method === "return" ||
-              (method === "throw" && delegate.iterator[method] === undefined)) {
-            // A return or throw (when the delegate iterator has no throw
-            // method) always terminates the yield* loop.
-            context.delegate = null;
-
-            // If the delegate iterator has a return method, give it a
-            // chance to clean up.
-            var returnMethod = delegate.iterator["return"];
-            if (returnMethod) {
-              var record = tryCatch(returnMethod, delegate.iterator, arg);
-              if (record.type === "throw") {
-                // If the return method threw an exception, let that
-                // exception prevail over the original return or throw.
-                method = "throw";
-                arg = record.arg;
-                continue;
-              }
-            }
-
-            if (method === "return") {
-              // Continue with the outer return, now that the delegate
-              // iterator has been terminated.
-              continue;
-            }
+          var delegateResult = maybeInvokeDelegate(delegate, context);
+          if (delegateResult) {
+            if (delegateResult === ContinueSentinel) continue;
+            return delegateResult;
           }
-
-          var record = tryCatch(
-            delegate.iterator[method],
-            delegate.iterator,
-            arg
-          );
-
-          if (record.type === "throw") {
-            context.delegate = null;
-
-            // Like returning generator.throw(uncaught), but without the
-            // overhead of an extra function call.
-            method = "throw";
-            arg = record.arg;
-            continue;
-          }
-
-          // Delegate generator ran and handled its own exceptions so
-          // regardless of what the method was, we continue as if it is
-          // "next" with an undefined arg.
-          method = "next";
-          arg = undefined;
-
-          var info = record.arg;
-          if (info.done) {
-            context[delegate.resultName] = info.value;
-            context.next = delegate.nextLoc;
-          } else {
-            state = GenStateSuspendedYield;
-            return info;
-          }
-
-          context.delegate = null;
         }
 
-        if (method === "next") {
+        if (context.method === "next") {
           // Setting context._sent for legacy support of Babel's
           // function.sent implementation.
-          context.sent = context._sent = arg;
+          context.sent = context._sent = context.arg;
 
-        } else if (method === "throw") {
+        } else if (context.method === "throw") {
           if (state === GenStateSuspendedStart) {
             state = GenStateCompleted;
-            throw arg;
+            throw context.arg;
           }
 
-          if (context.dispatchException(arg)) {
-            // If the dispatched exception was caught by a catch block,
-            // then let that catch block handle the exception normally.
-            method = "next";
-            arg = undefined;
-          }
+          context.dispatchException(context.arg);
 
-        } else if (method === "return") {
-          context.abrupt("return", arg);
+        } else if (context.method === "return") {
+          context.abrupt("return", context.arg);
         }
 
         state = GenStateExecuting;
@@ -2738,30 +2682,106 @@ if (hadRuntime) {
             ? GenStateCompleted
             : GenStateSuspendedYield;
 
-          var info = {
+          if (record.arg === ContinueSentinel) {
+            continue;
+          }
+
+          return {
             value: record.arg,
             done: context.done
           };
 
-          if (record.arg === ContinueSentinel) {
-            if (context.delegate && method === "next") {
-              // Deliberately forget the last sent value so that we don't
-              // accidentally pass it on to the delegate.
-              arg = undefined;
-            }
-          } else {
-            return info;
-          }
-
         } else if (record.type === "throw") {
           state = GenStateCompleted;
           // Dispatch the exception by looping back around to the
-          // context.dispatchException(arg) call above.
-          method = "throw";
-          arg = record.arg;
+          // context.dispatchException(context.arg) call above.
+          context.method = "throw";
+          context.arg = record.arg;
         }
       }
     };
+  }
+
+  // Call delegate.iterator[context.method](context.arg) and handle the
+  // result, either by returning a { value, done } result from the
+  // delegate iterator, or by modifying context.method and context.arg,
+  // setting context.delegate to null, and returning the ContinueSentinel.
+  function maybeInvokeDelegate(delegate, context) {
+    var method = delegate.iterator[context.method];
+    if (method === undefined) {
+      // A .throw or .return when the delegate iterator has no .throw
+      // method always terminates the yield* loop.
+      context.delegate = null;
+
+      if (context.method === "throw") {
+        if (delegate.iterator.return) {
+          // If the delegate iterator has a return method, give it a
+          // chance to clean up.
+          context.method = "return";
+          context.arg = undefined;
+          maybeInvokeDelegate(delegate, context);
+
+          if (context.method === "throw") {
+            // If maybeInvokeDelegate(context) changed context.method from
+            // "return" to "throw", let that override the TypeError below.
+            return ContinueSentinel;
+          }
+        }
+
+        context.method = "throw";
+        context.arg = new TypeError(
+          "The iterator does not provide a 'throw' method");
+      }
+
+      return ContinueSentinel;
+    }
+
+    var record = tryCatch(method, delegate.iterator, context.arg);
+
+    if (record.type === "throw") {
+      context.method = "throw";
+      context.arg = record.arg;
+      context.delegate = null;
+      return ContinueSentinel;
+    }
+
+    var info = record.arg;
+
+    if (! info) {
+      context.method = "throw";
+      context.arg = new TypeError("iterator result is not an object");
+      context.delegate = null;
+      return ContinueSentinel;
+    }
+
+    if (info.done) {
+      // Assign the result of the finished delegate to the temporary
+      // variable specified by delegate.resultName (see delegateYield).
+      context[delegate.resultName] = info.value;
+
+      // Resume execution at the desired location (see delegateYield).
+      context.next = delegate.nextLoc;
+
+      // If context.method was "throw" but the delegate handled the
+      // exception, let the outer generator proceed normally. If
+      // context.method was "next", forget context.arg since it has been
+      // "consumed" by the delegate iterator. If context.method was
+      // "return", allow the original .return call to continue in the
+      // outer generator.
+      if (context.method !== "return") {
+        context.method = "next";
+        context.arg = undefined;
+      }
+
+    } else {
+      // Re-yield the result returned by the delegate method.
+      return info;
+    }
+
+    // The delegate iterator is finished, so forget it and continue with
+    // the outer generator.
+    context.delegate = null;
+    return ContinueSentinel;
   }
 
   // Define Generator.prototype.{next,throw,return} in terms of the
@@ -2884,6 +2904,9 @@ if (hadRuntime) {
       this.done = false;
       this.delegate = null;
 
+      this.method = "next";
+      this.arg = undefined;
+
       this.tryEntries.forEach(resetTryEntry);
 
       if (!skipTempReset) {
@@ -2920,7 +2943,15 @@ if (hadRuntime) {
         record.type = "throw";
         record.arg = exception;
         context.next = loc;
-        return !!caught;
+
+        if (caught) {
+          // If the dispatched exception was caught by a catch block,
+          // then let that catch block handle the exception normally.
+          context.method = "next";
+          context.arg = undefined;
+        }
+
+        return !! caught;
       }
 
       for (var i = this.tryEntries.length - 1; i >= 0; --i) {
@@ -2988,12 +3019,12 @@ if (hadRuntime) {
       record.arg = arg;
 
       if (finallyEntry) {
+        this.method = "next";
         this.next = finallyEntry.finallyLoc;
-      } else {
-        this.complete(record);
+        return ContinueSentinel;
       }
 
-      return ContinueSentinel;
+      return this.complete(record);
     },
 
     complete: function(record, afterLoc) {
@@ -3005,11 +3036,14 @@ if (hadRuntime) {
           record.type === "continue") {
         this.next = record.arg;
       } else if (record.type === "return") {
-        this.rval = record.arg;
+        this.rval = this.arg = record.arg;
+        this.method = "return";
         this.next = "end";
       } else if (record.type === "normal" && afterLoc) {
         this.next = afterLoc;
       }
+
+      return ContinueSentinel;
     },
 
     finish: function(finallyLoc) {
@@ -3047,6 +3081,12 @@ if (hadRuntime) {
         resultName: resultName,
         nextLoc: nextLoc
       };
+
+      if (this.method === "next") {
+        // Deliberately forget the last sent value so that we don't
+        // accidentally pass it on to the delegate.
+        this.arg = undefined;
+      }
 
       return ContinueSentinel;
     }
@@ -4048,41 +4088,44 @@ var assert = require('assert');
 var _require = require('./helpers.js'),
     IsFiniteNonNegativeNumber = _require.IsFiniteNonNegativeNumber;
 
-exports.DequeueValue = function (queue) {
-  assert(queue.length > 0, 'Spec-level failure: should never dequeue from an empty queue.');
-  var pair = queue.shift();
+exports.DequeueValue = function (container) {
+  assert('_queue' in container && '_queueTotalSize' in container, 'Spec-level failure: DequeueValue should only be used on containers with [[queue]] and [[queueTotalSize]].');
+  assert(container._queue.length > 0, 'Spec-level failure: should never dequeue from an empty queue.');
 
-  queue._totalSize -= pair.size;
+  var pair = container._queue.shift();
+  container._queueTotalSize -= pair.size;
+  if (container._queueTotalSize < 0) {
+    container._queueTotalSize = 0;
+  }
 
   return pair.value;
 };
 
-exports.EnqueueValueWithSize = function (queue, value, size) {
+exports.EnqueueValueWithSize = function (container, value, size) {
+  assert('_queue' in container && '_queueTotalSize' in container, 'Spec-level failure: EnqueueValueWithSize should only be used on containers with [[queue]] and ' + '[[queueTotalSize]].');
+
   size = Number(size);
   if (!IsFiniteNonNegativeNumber(size)) {
     throw new RangeError('Size must be a finite, non-NaN, non-negative number.');
   }
 
-  queue.push({ value: value, size: size });
-
-  if (queue._totalSize === undefined) {
-    queue._totalSize = 0;
-  }
-  queue._totalSize += size;
+  container._queue.push({ value: value, size: size });
+  container._queueTotalSize += size;
 };
 
-// This implementation is not per-spec. Total size is cached for speed.
-exports.GetTotalQueueSize = function (queue) {
-  if (queue._totalSize === undefined) {
-    queue._totalSize = 0;
-  }
-  return queue._totalSize;
-};
+exports.PeekQueueValue = function (container) {
+  assert('_queue' in container && '_queueTotalSize' in container, 'Spec-level failure: PeekQueueValue should only be used on containers with [[queue]] and [[queueTotalSize]].');
+  assert(container._queue.length > 0, 'Spec-level failure: should never peek at an empty queue.');
 
-exports.PeekQueueValue = function (queue) {
-  assert(queue.length > 0, 'Spec-level failure: should never peek at an empty queue.');
-  var pair = queue[0];
+  var pair = container._queue[0];
   return pair.value;
+};
+
+exports.ResetQueue = function (container) {
+  assert('_queue' in container && '_queueTotalSize' in container, 'Spec-level failure: ResetQueue should only be used on containers with [[queue]] and [[queueTotalSize]].');
+
+  container._queue = [];
+  container._queueTotalSize = 0;
 };
 
 },{"./helpers.js":118,"assert":1}],121:[function(require,module,exports){
@@ -4141,7 +4184,7 @@ var _require3 = require('./utils.js'),
 var _require4 = require('./queue-with-sizes.js'),
     DequeueValue = _require4.DequeueValue,
     EnqueueValueWithSize = _require4.EnqueueValueWithSize,
-    GetTotalQueueSize = _require4.GetTotalQueueSize;
+    ResetQueue = _require4.ResetQueue;
 
 var _require5 = require('./writable-stream.js'),
     AcquireWritableStreamDefaultWriter = _require5.AcquireWritableStreamDefaultWriter,
@@ -4338,17 +4381,15 @@ var ReadableStream = function () {
 
         // Closing must be propagated backward
         if (dest._state === 'closing' || dest._state === 'closed') {
-          (function () {
-            var destClosed = new TypeError('the destination writable stream closed before all data could be piped to it');
+          var destClosed = new TypeError('the destination writable stream closed before all data could be piped to it');
 
-            if (preventCancel === false) {
-              shutdownWithAction(function () {
-                return ReadableStreamCancel(_this, destClosed);
-              }, true, destClosed);
-            } else {
-              shutdown(true, destClosed);
-            }
-          })();
+          if (preventCancel === false) {
+            shutdownWithAction(function () {
+              return ReadableStreamCancel(_this, destClosed);
+            }, true, destClosed);
+          } else {
+            shutdown(true, destClosed);
+          }
         }
 
         pipeLoop().catch(function (err) {
@@ -5128,7 +5169,11 @@ var ReadableStreamDefaultController = function () {
 
     this._underlyingSource = underlyingSource;
 
-    this._queue = [];
+    // Need to set the slots so that the assert doesn't fire. In the spec the slots already exist implicitly.
+    this._queue = undefined;
+    this._queueTotalSize = undefined;
+    ResetQueue(this);
+
     this._started = false;
     this._closeRequested = false;
     this._pullAgain = false;
@@ -5206,8 +5251,7 @@ var ReadableStreamDefaultController = function () {
   }, {
     key: InternalCancel,
     value: function value(reason) {
-      this._queue = [];
-
+      ResetQueue(this);
       return PromiseInvokeOrNoop(this._underlyingSource, 'cancel', [reason]);
     }
   }, {
@@ -5216,7 +5260,7 @@ var ReadableStreamDefaultController = function () {
       var stream = this._controlledReadableStream;
 
       if (this._queue.length > 0) {
-        var chunk = DequeueValue(this._queue);
+        var chunk = DequeueValue(this);
 
         if (this._closeRequested === true && this._queue.length === 0) {
           ReadableStreamClose(stream);
@@ -5353,7 +5397,7 @@ function ReadableStreamDefaultControllerEnqueue(controller, chunk) {
     }
 
     try {
-      EnqueueValueWithSize(controller._queue, chunk, chunkSize);
+      EnqueueValueWithSize(controller, chunk, chunkSize);
     } catch (enqueueE) {
       ReadableStreamDefaultControllerErrorIfNeeded(controller, enqueueE);
       throw enqueueE;
@@ -5370,7 +5414,7 @@ function ReadableStreamDefaultControllerError(controller, e) {
 
   assert(stream._state === 'readable');
 
-  controller._queue = [];
+  ResetQueue(controller);
 
   ReadableStreamError(stream, e);
 }
@@ -5382,8 +5426,17 @@ function ReadableStreamDefaultControllerErrorIfNeeded(controller, e) {
 }
 
 function ReadableStreamDefaultControllerGetDesiredSize(controller) {
-  var queueSize = GetTotalQueueSize(controller._queue);
-  return controller._strategyHWM - queueSize;
+  var stream = controller._controlledReadableStream;
+  var state = stream._state;
+
+  if (state === 'errored') {
+    return null;
+  }
+  if (state === 'closed') {
+    return 0;
+  }
+
+  return controller._strategyHWM - controller._queueTotalSize;
 }
 
 var ReadableStreamBYOBRequest = function () {
@@ -5454,11 +5507,11 @@ var ReadableByteStreamController = function () {
 
     ReadableByteStreamControllerClearPendingPullIntos(this);
 
-    this._queue = [];
-    this._totalQueuedBytes = 0;
+    // Need to set the slots so that the assert doesn't fire. In the spec the slots already exist implicitly.
+    this._queue = this._queueTotalSize = undefined;
+    ResetQueue(this);
 
     this._closeRequested = false;
-
     this._started = false;
 
     this._strategyHWM = ValidateAndNormalizeHighWaterMark(highWaterMark);
@@ -5552,8 +5605,7 @@ var ReadableByteStreamController = function () {
         firstDescriptor.bytesFilled = 0;
       }
 
-      this._queue = [];
-      this._totalQueuedBytes = 0;
+      ResetQueue(this);
 
       return PromiseInvokeOrNoop(this._underlyingByteSource, 'cancel', [reason]);
     }
@@ -5563,11 +5615,11 @@ var ReadableByteStreamController = function () {
       var stream = this._controlledReadableStream;
       assert(ReadableStreamHasDefaultReader(stream) === true);
 
-      if (this._totalQueuedBytes > 0) {
+      if (this._queueTotalSize > 0) {
         assert(ReadableStreamGetNumReadRequests(stream) === 0);
 
         var entry = this._queue.shift();
-        this._totalQueuedBytes -= entry.byteLength;
+        this._queueTotalSize -= entry.byteLength;
 
         ReadableByteStreamControllerHandleQueueDrain(this);
 
@@ -5732,7 +5784,7 @@ function ReadableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescripto
 
 function ReadableByteStreamControllerEnqueueChunkToQueue(controller, buffer, byteOffset, byteLength) {
   controller._queue.push({ buffer: buffer, byteOffset: byteOffset, byteLength: byteLength });
-  controller._totalQueuedBytes += byteLength;
+  controller._queueTotalSize += byteLength;
 }
 
 function ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor) {
@@ -5740,7 +5792,7 @@ function ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller,
 
   var currentAlignedBytes = pullIntoDescriptor.bytesFilled - pullIntoDescriptor.bytesFilled % elementSize;
 
-  var maxBytesToCopy = Math.min(controller._totalQueuedBytes, pullIntoDescriptor.byteLength - pullIntoDescriptor.bytesFilled);
+  var maxBytesToCopy = Math.min(controller._queueTotalSize, pullIntoDescriptor.byteLength - pullIntoDescriptor.bytesFilled);
   var maxBytesFilled = pullIntoDescriptor.bytesFilled + maxBytesToCopy;
   var maxAlignedBytes = maxBytesFilled - maxBytesFilled % elementSize;
 
@@ -5767,7 +5819,7 @@ function ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller,
       headOfQueue.byteOffset += bytesToCopy;
       headOfQueue.byteLength -= bytesToCopy;
     }
-    controller._totalQueuedBytes -= bytesToCopy;
+    controller._queueTotalSize -= bytesToCopy;
 
     ReadableByteStreamControllerFillHeadPullIntoDescriptor(controller, bytesToCopy, pullIntoDescriptor);
 
@@ -5775,7 +5827,7 @@ function ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller,
   }
 
   if (ready === false) {
-    assert(controller._totalQueuedBytes === 0, 'queue must be empty');
+    assert(controller._queueTotalSize === 0, 'queue must be empty');
     assert(pullIntoDescriptor.bytesFilled > 0);
     assert(pullIntoDescriptor.bytesFilled < pullIntoDescriptor.elementSize);
   }
@@ -5793,7 +5845,7 @@ function ReadableByteStreamControllerFillHeadPullIntoDescriptor(controller, size
 function ReadableByteStreamControllerHandleQueueDrain(controller) {
   assert(controller._controlledReadableStream._state === 'readable');
 
-  if (controller._totalQueuedBytes === 0 && controller._closeRequested === true) {
+  if (controller._queueTotalSize === 0 && controller._closeRequested === true) {
     ReadableStreamClose(controller._controlledReadableStream);
   } else {
     ReadableByteStreamControllerCallPullIfNeeded(controller);
@@ -5814,7 +5866,7 @@ function ReadableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(contro
   assert(controller._closeRequested === false);
 
   while (controller._pendingPullIntos.length > 0) {
-    if (controller._totalQueuedBytes === 0) {
+    if (controller._queueTotalSize === 0) {
       return;
     }
 
@@ -5864,7 +5916,7 @@ function ReadableByteStreamControllerPullInto(controller, view) {
     return _promise2.default.resolve(CreateIterResultObject(emptyView, true));
   }
 
-  if (controller._totalQueuedBytes > 0) {
+  if (controller._queueTotalSize > 0) {
     if (ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor) === true) {
       var filledView = ReadableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor);
 
@@ -5995,7 +6047,7 @@ function ReadableByteStreamControllerClose(controller) {
   assert(controller._closeRequested === false);
   assert(stream._state === 'readable');
 
-  if (controller._totalQueuedBytes > 0) {
+  if (controller._queueTotalSize > 0) {
     controller._closeRequested = true;
 
     return;
@@ -6051,13 +6103,22 @@ function ReadableByteStreamControllerError(controller, e) {
 
   ReadableByteStreamControllerClearPendingPullIntos(controller);
 
-  controller._queue = [];
-
+  ResetQueue(controller);
   ReadableStreamError(stream, e);
 }
 
 function ReadableByteStreamControllerGetDesiredSize(controller) {
-  return controller._strategyHWM - controller._totalQueuedBytes;
+  var stream = controller._controlledReadableStream;
+  var state = stream._state;
+
+  if (state === 'errored') {
+    return null;
+  }
+  if (state === 'closed') {
+    return 0;
+  }
+
+  return controller._strategyHWM - controller._queueTotalSize;
 }
 
 function ReadableByteStreamControllerRespond(controller, bytesWritten) {
@@ -6728,8 +6789,8 @@ var _require2 = require('./utils.js'),
 var _require3 = require('./queue-with-sizes.js'),
     DequeueValue = _require3.DequeueValue,
     EnqueueValueWithSize = _require3.EnqueueValueWithSize,
-    GetTotalQueueSize = _require3.GetTotalQueueSize,
-    PeekQueueValue = _require3.PeekQueueValue;
+    PeekQueueValue = _require3.PeekQueueValue,
+    ResetQueue = _require3.ResetQueue;
 
 var WritableStream = function () {
   function WritableStream() {
@@ -7239,14 +7300,8 @@ var WritableStreamDefaultWriter = function () {
         return _promise2.default.reject(defaultWriterBrandCheckException('write'));
       }
 
-      var stream = this._ownerWritableStream;
-
-      if (stream === undefined) {
+      if (this._ownerWritableStream === undefined) {
         return _promise2.default.reject(defaultWriterLockException('write to'));
-      }
-
-      if (stream._state === 'closing') {
-        return _promise2.default.reject(new TypeError('Cannot write to an already-closed stream'));
       }
 
       return WritableStreamDefaultWriterWrite(this, chunk);
@@ -7419,19 +7474,25 @@ function WritableStreamDefaultWriterWrite(writer, chunk) {
 
   assert(stream !== undefined);
 
+  var controller = stream._writableStreamController;
+
+  var chunkSize = WritableStreamDefaultControllerGetChunkSize(controller, chunk);
+
+  if (stream !== writer._ownerWritableStream) {
+    return _promise2.default.reject(defaultWriterLockException('write to'));
+  }
+
   var state = stream._state;
-  if (state === 'closed' || state === 'errored') {
+  if (state !== 'writable') {
     return _promise2.default.reject(new TypeError('The stream (in ' + state + ' state) is not in the writable state and cannot be written to'));
   }
   if (stream._pendingAbortRequest !== undefined) {
     return _promise2.default.reject(new TypeError('Aborted'));
   }
 
-  assert(state === 'writable');
-
   var promise = WritableStreamAddWriteRequest(stream);
 
-  WritableStreamDefaultControllerWrite(stream._writableStreamController, chunk);
+  WritableStreamDefaultControllerWrite(controller, chunk, chunkSize);
 
   return promise;
 }
@@ -7452,7 +7513,11 @@ var WritableStreamDefaultController = function () {
 
     this._underlyingSink = underlyingSink;
 
-    this._queue = [];
+    // Need to set the slots so that the assert doesn't fire. In the spec the slots already exist implicitly.
+    this._queue = undefined;
+    this._queueTotalSize = undefined;
+    ResetQueue(this);
+
     this._started = false;
     this._writing = false;
     this._inClose = false;
@@ -7498,8 +7563,7 @@ var WritableStreamDefaultController = function () {
 // Abstract operations implementing interface required by the WritableStream.
 
 function WritableStreamDefaultControllerAbort(controller, reason) {
-  controller._queue = [];
-
+  ResetQueue(controller);
   var sinkAbortPromise = PromiseInvokeOrNoop(controller._underlyingSink, 'abort', [reason]);
   return sinkAbortPromise.then(function () {
     return undefined;
@@ -7507,13 +7571,27 @@ function WritableStreamDefaultControllerAbort(controller, reason) {
 }
 
 function WritableStreamDefaultControllerClose(controller) {
-  EnqueueValueWithSize(controller._queue, 'close', 0);
+  EnqueueValueWithSize(controller, 'close', 0);
   WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
 }
 
+function WritableStreamDefaultControllerGetChunkSize(controller, chunk) {
+  var strategySize = controller._strategySize;
+
+  if (strategySize === undefined) {
+    return 1;
+  }
+
+  try {
+    return strategySize(chunk);
+  } catch (chunkSizeE) {
+    WritableStreamDefaultControllerErrorIfNeeded(controller, chunkSizeE);
+    return 1;
+  }
+}
+
 function WritableStreamDefaultControllerGetDesiredSize(controller) {
-  var queueSize = GetTotalQueueSize(controller._queue);
-  return controller._strategyHWM - queueSize;
+  return controller._strategyHWM - controller._queueTotalSize;
 }
 
 function WritableStreamDefaultControllerUpdateBackpressureIfNeeded(controller, oldBackpressure) {
@@ -7528,30 +7606,17 @@ function WritableStreamDefaultControllerUpdateBackpressureIfNeeded(controller, o
   }
 }
 
-function WritableStreamDefaultControllerWrite(controller, chunk) {
+function WritableStreamDefaultControllerWrite(controller, chunk, chunkSize) {
   var stream = controller._controlledWritableStream;
 
   assert(stream._state === 'writable');
-
-  var chunkSize = 1;
-
-  if (controller._strategySize !== undefined) {
-    var strategySize = controller._strategySize;
-    try {
-      chunkSize = strategySize(chunk);
-    } catch (chunkSizeE) {
-      // TODO: Should we notify the sink of this error?
-      WritableStreamDefaultControllerErrorIfNeeded(controller, chunkSizeE);
-      return;
-    }
-  }
 
   var writeRecord = { chunk: chunk };
 
   var oldBackpressure = WritableStreamDefaultControllerGetBackpressure(controller);
 
   try {
-    EnqueueValueWithSize(controller._queue, writeRecord, chunkSize);
+    EnqueueValueWithSize(controller, writeRecord, chunkSize);
   } catch (enqueueE) {
     WritableStreamDefaultControllerErrorIfNeeded(controller, enqueueE);
     return;
@@ -7593,7 +7658,7 @@ function WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller) {
     return;
   }
 
-  var writeRecord = PeekQueueValue(controller._queue);
+  var writeRecord = PeekQueueValue(controller);
   if (writeRecord === 'close') {
     WritableStreamDefaultControllerProcessClose(controller);
   } else {
@@ -7612,7 +7677,7 @@ function WritableStreamDefaultControllerProcessClose(controller) {
 
   assert(stream._state === 'closing', 'can\'t process final write record unless already closed');
 
-  DequeueValue(controller._queue);
+  DequeueValue(controller);
   assert(controller._queue.length === 0, 'queue must be empty once the final write record is dequeued');
 
   controller._inClose = true;
@@ -7653,7 +7718,7 @@ function WritableStreamDefaultControllerProcessWrite(controller, chunk) {
     assert(state === 'closing' || state === 'writable');
 
     var oldBackpressure = WritableStreamDefaultControllerGetBackpressure(controller);
-    DequeueValue(controller._queue);
+    DequeueValue(controller);
     WritableStreamDefaultControllerUpdateBackpressureIfNeeded(controller, oldBackpressure);
 
     WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
@@ -7697,11 +7762,9 @@ function WritableStreamDefaultControllerError(controller, e) {
     WritableStreamDefaultWriterEnsureReadyPromiseRejectedWith(stream._writer, e, readyPromiseIsPending);
   }
 
-  controller._queue = [];
+  ResetQueue(controller);
 
-  // This method can be called during the construction of the controller, in which case "controller" will be undefined
-  // but the flags are guaranteed to be false anyway.
-  if (controller === undefined || controller._writing === false && controller._inClose === false) {
+  if (controller._writing === false && controller._inClose === false) {
     WritableStreamRejectPromisesInReactionToError(stream);
   }
 }
